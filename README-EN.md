@@ -6,7 +6,7 @@ A **zero-dependency · single-file · double-click-to-run** visual HTML layout d
 
 ## Quick Start
 
-1. Double-click `layout.html` to open
+1. Double-click `index.html` to open
 2. Right-click empty canvas area → **Add Element**, or insert from templates
 3. **Drag** to move elements, use **8-direction resize handles** to adjust dimensions
 4. Right-click an element → Edit HTML / JSON / styles
