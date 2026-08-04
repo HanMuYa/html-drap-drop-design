@@ -1392,6 +1392,16 @@
             if (oldScript && oldScript.parentNode) oldScript.parentNode.removeChild(oldScript);
 
             if (_js.trim()) {
+                // 预检语法：解析期的 SyntaxError 无法被 appendChild 的 try-catch 捕获，
+                // 先用 new Function 在隔离作用域内检查语法，失败则跳过并提示。
+                try {
+                    new Function(_js);
+                } catch (syntaxErr) {
+                    try {
+                        console.error('全局 JS 语法错误，已跳过加载：', syntaxErr && syntaxErr.message ? syntaxErr.message : syntaxErr);
+                    } catch (_) {}
+                    return;
+                }
                 const scriptEl = document.createElement('script');
                 scriptEl.id = 'global-custom-js-runtime';
                 // 安全：避免 script 结束标签直接打断、恶意执行
@@ -2595,6 +2605,7 @@
             try {
                 const boxes = canvas.querySelectorAll('.draggable-box');
                 let boxesHTML = '';
+                let hasAutoHeight = false;  // 标记是否有自适应高度元素（决定是否嵌入级联脚本）
                 // ---------- 修复 统计所有元素占据的最大视口高度（>100vh时画布要能滚动）----------
                 let maxVhExtent = 100;  // 默认至少 100vh
                 boxes.forEach(function (box) {
@@ -2613,10 +2624,12 @@
                         const codeContainer = box.querySelector('div[type="code"]');
                         const innerContent = _getRawHtml(codeContainer);
                         const isAuto = box.dataset.autoHeight === '1';
+                        if (isAuto) hasAutoHeight = true;
                         const heightCss = isAuto ? 'auto' : escapeAttr(heightVhVal + 'vh');
                         const innerCss = isAuto
                             ? 'flex:0 0 auto;width:100%;height:auto;overflow-y:visible;word-break:break-all;font-size:14px;color:#333;padding:0;'
                             : 'flex:1;width:100%;height:100%;overflow:auto;word-break:break-all;font-size:14px;color:#333;padding:0;';
+                        const dataAttrs = ' data-top-vh="' + topVhNum.toFixed(6) + '" data-height-vh="' + heightVhNum.toFixed(6) + '"' + (isAuto ? ' data-auto-height="1"' : '');
                         boxesHTML += '\n        <div id="' + escapeAttr(elementId) +
                             '" style="' +
                             'position:absolute;' +
@@ -2626,7 +2639,7 @@
                             'height:' + heightCss + ';' +
                             'z-index:' + escapeAttr(zIndex) + ';' +
                             'background:transparent;border:none;padding:0;display:flex;flex-direction:column;justify-content:space-between;' +
-                            '">' +
+                            '"' + dataAttrs + '>' +
                             '<div type="code" style="' + innerCss + '">' +
                             innerContent +
                             '</div></div>';
@@ -2666,6 +2679,143 @@
                     '        #canvas-bg{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;' + exportBgCss + '}\n';
 
                 // 注意：所有闭合标签必须用 '<' + '/' + 'xxx' 字符串拼接，禁止字面 '</x' 相邻
+
+                // 自包含自适应高度级联脚本（仅当存在自适应高度元素时嵌入）
+                var AUTO_HEIGHT_SCRIPT = '';
+                if (hasAutoHeight) {
+                    AUTO_HEIGHT_SCRIPT =
+                    '    <' + 'script>\n' +
+                    '        (function () {\n' +
+                    '            var canvas = document.getElementById("canvas");\n' +
+                    '            if (!canvas) return;\n' +
+                    '            var _roCache = new WeakMap();\n' +
+                    '            function getBoxes() { return canvas.querySelectorAll("[data-top-vh]"); }\n' +
+                    '            function updateCanvasHeight() {\n' +
+                    '                var maxB = 0, wh = window.innerHeight, all = getBoxes();\n' +
+                    '                all.forEach(function (b) { var t = b.offsetTop, h = b.offsetHeight; if (t + h > maxB) maxB = t + h; });\n' +
+                    '                if (maxB > wh) {\n' +
+                    '                    var oneVh = Math.max(1, Math.round(wh * 0.01));\n' +
+                    '                    var totalH = maxB + oneVh;\n' +
+                    '                    canvas.style.height = totalH + "px";\n' +
+                    '                    canvas.style.minHeight = totalH + "px";\n' +
+                    '                } else {\n' +
+                    '                    canvas.style.height = "100vh";\n' +
+                    '                    canvas.style.minHeight = "100vh";\n' +
+                    '                }\n' +
+                    '            }\n' +
+                    '            function pushDownBelow(origin, oldH, delta) {\n' +
+                    '                if (!origin || !delta || Math.abs(delta) < 0.5) return;\n' +
+                    '                var wh = window.innerHeight || 1;\n' +
+                    '                var ot = origin.offsetTop, ob = ot + oldH;\n' +
+                    '                getBoxes().forEach(function (b) {\n' +
+                    '                    if (b === origin) return;\n' +
+                    '                    var t = b.offsetTop;\n' +
+                    '                    if (t >= ob - 2) {\n' +
+                    '                        var nt = t + delta;\n' +
+                    '                        if (nt < 0) nt = 0;\n' +
+                    '                        b.style.top = nt + "px";\n' +
+                    '                        b.setAttribute("data-top-vh", String(nt / wh));\n' +
+                    '                    }\n' +
+                    '                });\n' +
+                    '            }\n' +
+                    '            function applyAutoHeight(box) {\n' +
+                    '                if (box.getAttribute("data-auto-height") !== "1") return;\n' +
+                    '                var oldH = parseFloat(box.getAttribute("data-auto-base-h"));\n' +
+                    '                if (isNaN(oldH) || oldH <= 0) oldH = box.offsetHeight || 0;\n' +
+                    '                box.style.height = "";\n' +
+                    '                var newH = box.offsetHeight;\n' +
+                    '                box.setAttribute("data-auto-base-h", String(newH));\n' +
+                    '                pushDownBelow(box, oldH, newH - oldH);\n' +
+                    '                updateCanvasHeight();\n' +
+                    '            }\n' +
+                    '            function applyAutoHeights() {\n' +
+                    '                var sorted = Array.prototype.slice.call(getBoxes()).sort(function (a, b) { return (a.offsetTop || 0) - (b.offsetTop || 0); });\n' +
+                    '                sorted.forEach(function (box) { applyAutoHeight(box); });\n' +
+                    '            }\n' +
+                    '            function setupAutoHeightObservers() {\n' +
+                    '                if (typeof ResizeObserver === "undefined") return;\n' +
+                    '                getBoxes().forEach(function (box) {\n' +
+                    '                    if (box.getAttribute("data-auto-height") !== "1") return;\n' +
+                    '                    if (_roCache.has(box)) return;\n' +
+                    '                    var content = box.querySelector("div[type=\\"code\\"]");\n' +
+                    '                    if (!content) return;\n' +
+                    '                    try {\n' +
+                    '                        var ro = new ResizeObserver(function () { applyAutoHeight(box); });\n' +
+                    '                        ro.observe(content);\n' +
+                    '                        _roCache.set(box, ro);\n' +
+                    '                    } catch (_) {}\n' +
+                    '                });\n' +
+                    '            }\n' +
+                    '            // 窗口缩放：快照 → vh 缩放 → 级联修正（与编辑器行为一致）\n' +
+                    '            function cascadeFixOnResize() {\n' +
+                    '                var wh = window.innerHeight, all = getBoxes();\n' +
+                    '                // 1. 拍快照 — 记录缩放前每个元素的真实 top / height / bottom\n' +
+                    '                var snapshot = [];\n' +
+                    '                all.forEach(function (box) {\n' +
+                    '                    var t = box.offsetTop;\n' +
+                    '                    var h = box.offsetHeight;\n' +
+                    '                    snapshot.push({ el: box, top0: t, height0: h, bottom0: t + h, isAuto: box.getAttribute("data-auto-height") === "1" });\n' +
+                    '                });\n' +
+                    '                // 2. vh 比例缩放 top / height\n' +
+                    '                all.forEach(function (box) {\n' +
+                    '                    var tvh = parseFloat(box.getAttribute("data-top-vh"));\n' +
+                    '                    if (!isNaN(tvh)) box.style.top = (tvh * wh) + "px";\n' +
+                    '                    if (box.getAttribute("data-auto-height") !== "1") {\n' +
+                    '                        var hvh = parseFloat(box.getAttribute("data-height-vh"));\n' +
+                    '                        if (!isNaN(hvh)) box.style.height = (hvh * wh) + "px";\n' +
+                    '                    } else {\n' +
+                    '                        box.removeAttribute("data-auto-base-h");\n' +
+                    '                        box.style.height = "";\n' +
+                    '                    }\n' +
+                    '                });\n' +
+                    '                // 3. 用快照中的原始间距级联修正（保证自适应元素下方元素间隔不变）\n' +
+                    '                snapshot.sort(function (a, b) { return a.top0 - b.top0; });\n' +
+                    '                for (var i = 0; i < snapshot.length; i++) {\n' +
+                    '                    var item = snapshot[i];\n' +
+                    '                    if (!item.isAuto) continue;\n' +
+                    '                    var box = item.el;\n' +
+                    '                    var curTop = box.offsetTop;\n' +
+                    '                    var curH = box.offsetHeight;\n' +
+                    '                    var curBottom = curTop + curH;\n' +
+                    '                    box.setAttribute("data-auto-base-h", String(curH));\n' +
+                    '                    box.setAttribute("data-height-vh", String(curH / (wh || 1)));\n' +
+                    '                    for (var j = i + 1; j < snapshot.length; j++) {\n' +
+                    '                        var other = snapshot[j];\n' +
+                    '                        if (other.top0 < item.bottom0 - 2) continue;\n' +
+                    '                        var gap = other.top0 - item.bottom0;\n' +
+                    '                        var expectedTop = curBottom + gap;\n' +
+                    '                        if (expectedTop < 0) expectedTop = 0;\n' +
+                    '                        var curOtherTop = other.el.offsetTop;\n' +
+                    '                        if (Math.abs(curOtherTop - expectedTop) > 0.5) {\n' +
+                    '                            other.el.style.top = expectedTop + "px";\n' +
+                    '                            other.el.setAttribute("data-top-vh", String(expectedTop / (wh || 1)));\n' +
+                    '                        }\n' +
+                    '                    }\n' +
+                    '                }\n' +
+                    '                updateCanvasHeight();\n' +
+                    '            }\n' +
+                    '            function init() {\n' +
+                    '                var wh = window.innerHeight, all = getBoxes();\n' +
+                    '                all.forEach(function (box) {\n' +
+                    '                    var tvh = parseFloat(box.getAttribute("data-top-vh"));\n' +
+                    '                    if (!isNaN(tvh)) box.style.top = (tvh * wh) + "px";\n' +
+                    '                    if (box.getAttribute("data-auto-height") !== "1") {\n' +
+                    '                        var hvh = parseFloat(box.getAttribute("data-height-vh"));\n' +
+                    '                        if (!isNaN(hvh)) box.style.height = (hvh * wh) + "px";\n' +
+                    '                    }\n' +
+                    '                });\n' +
+                    '                applyAutoHeights();\n' +
+                    '                setupAutoHeightObservers();\n' +
+                    '                updateCanvasHeight();\n' +
+                    '            }\n' +
+                    '            if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", init); }\n' +
+                    '            else { init(); }\n' +
+                    '            var _rt;\n' +
+                    '            window.addEventListener("resize", function () { if (_rt) clearTimeout(_rt); _rt = setTimeout(cascadeFixOnResize, 80); });\n' +
+                    '        })();\n' +
+                    '    <' + '/' + 'script>\n';
+                }
+
                 const standaloneHTML = '<!DOCTYPE html>\n' +
                     '<html lang="zh-CN">\n' +
                     '<head>\n' +
@@ -2681,6 +2831,7 @@
                     '        <div id="canvas-bg"></div>\n' +
                     boxesHTML + '\n' +
                     '    <' + '/div>\n' +
+                    AUTO_HEIGHT_SCRIPT +
                     '    <' + 'script>' + safeScriptEscape(String(globalJSCode || '')) + '<' + '/' + 'script>\n' +
                     '<' + '/body>\n' +
                     '<' + '/html>';
